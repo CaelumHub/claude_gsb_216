@@ -35,7 +35,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 512 * 1024 * 1024  # 512 MB upload cap
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024  # 1 GB upload cap (long recordings)
 if _CORS:
     CORS(app)
 
@@ -85,6 +85,7 @@ def _register_derived(source_id: str, name: str, wav_path: str,
 
 PAGES = {
     "library": "音频库",
+    "record": "录音",
     "waveform": "波形编辑",
     "spectrogram": "频谱分析",
     "pitch_beat": "音高与节拍",
@@ -182,6 +183,96 @@ def api_upload():
             "size_bytes": os.path.getsize(dst),
         })
     return jsonify(entry)
+
+
+@app.post("/api/library/record")
+def api_record():
+    """Register a WAV produced by the in-browser AudioWorklet recorder.
+
+    The browser has already encoded canonical little-endian PCM16 WAV; we
+    verify the header rather than re-encoding, so multi-minute recordings
+    arrive untouched (no resampling, no truncation, silence preserved).
+    """
+    f = request.files.get("file")
+    if f is None or not f.filename:
+        return jsonify(error="no file provided"), 400
+
+    name = (request.form.get("name") or f.filename or "recording.wav").strip()
+    if not name.lower().endswith(".wav"):
+        name += ".wav"
+    # Defensive: strip path separators so the library entry name stays a leaf.
+    name = os.path.basename(name) or "recording.wav"
+
+    file_id = storage.new_id()
+    dst = os.path.join(store.audio_dir, file_id + ".wav")
+    f.save(dst)
+
+    try:
+        info = _verify_recorded_wav(dst)
+    except Exception as e:
+        if os.path.exists(dst):
+            os.unlink(dst)
+        return jsonify(error=f"录音文件无效: {e}"), 400
+
+    sr, ch, frames = info
+    entry = store.add_file({
+        "id": file_id,
+        "name": name,
+        "original_format": "recorded",
+        "path": f"audio/{file_id}.wav",
+        "sr": sr,
+        "channels": ch,
+        "frames": frames,
+        "duration": frames / sr if sr else 0.0,
+        "size_bytes": os.path.getsize(dst),
+        "recorded": True,
+    })
+    return jsonify(entry)
+
+
+def _verify_recorded_wav(path: str):
+    """Validate a browser-recorded WAV: RIFF/WAVE, PCM16, non-empty.
+
+    Returns ``(sample_rate, channels, frames)``.  Raises ValueError on any
+    structural problem or mismatch with the on-disk data size.
+    """
+    with open(path, "rb") as fh:
+        head = fh.read(44)
+    if len(head) < 44 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+        raise ValueError("缺少 RIFF/WAVE 标识")
+    if head[12:16] != b"fmt ":
+        raise ValueError("缺少 fmt 子块")
+    import struct as _struct
+    fmt_tag, channels, sr, _, block_align, bits = _struct.unpack("<HHIIHH", head[20:36])
+    if fmt_tag != 1:
+        raise ValueError(f"不是 PCM 格式 (fmt tag {fmt_tag})")
+    if bits != 16:
+        raise ValueError(f"仅支持 16-bit PCM 录音（收到 {bits}-bit）")
+    if channels not in (1, 2):
+        raise ValueError(f"不支持的声道数 {channels}")
+    if head[36:40] != b"data":
+        raise ValueError("缺少 data 子块")
+    data_size = _struct.unpack("<I", head[40:44])[0]
+
+    actual = os.path.getsize(path)
+    # RIFF size = file - 8; data chunk begins at offset 44.
+    riff_size = _struct.unpack("<I", head[4:8])[0]
+    if riff_size + 8 != actual:
+        raise ValueError("RIFF 长度与文件大小不一致（录音可能被截断）")
+    if 44 + data_size > actual:
+        raise ValueError("data 长度超过文件大小（录音可能被截断）")
+    if block_align != channels * 2:
+        raise ValueError("block align 与声道/位深不匹配")
+
+    frames = data_size // block_align
+    if frames <= 0:
+        raise ValueError("录音为空（0 帧）")
+    # Cross-check the header using the standard reader — this also guarantees
+    # every downstream consumer (waveform/edit/analysis/export) can open it.
+    with audio_io.WavReader(path) as r:
+        if r.sr != sr or r.channels != channels or r.nframes != frames:
+            raise ValueError("WAV 头与实际音频参数不一致")
+    return sr, channels, frames
 
 
 def _synth(kind: str, sr: int, duration: float, freq: float) -> list:

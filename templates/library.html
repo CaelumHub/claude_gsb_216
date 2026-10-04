@@ -20,6 +20,17 @@
 </div>
 
 <div class="card">
+  <h2>麦克风录音</h2>
+  <div class="row between">
+    <div class="faint">
+      对着麦克风录音，录音时可查看实时电平，随时停止；停止后自动保存为音频库中的新文件，
+      静音与停顿如实保留，时长、采样率、声道均准确记录。
+    </div>
+    <a class="btn btn-green" href="/record">🎙 前往录音</a>
+  </div>
+</div>
+
+<div class="card">
   <h2>生成测试信号</h2>
   <div class="row">
     <button data-kind="sine">正弦波</button>
@@ -96,6 +107,7 @@ const SRC_LABEL = {
   upload: { text: "上传", cls: "" },
 };
 function srcBadge(f) {
+  if (f.recorded) return `<span class="badge red">录音</span>`;
   if (f.exported) return `<span class="badge amber">导出</span>`;
   if (f.separation) return `<span class="badge purple">分离</span>`;
   if (f.project_id) return `<span class="badge green">混音</span>`;

@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+{% block title %}录音{% endblock %}
+{% block content %}
+<div class="main-head">
+  <div>
+    <h1>录音</h1>
+    <div class="sub">麦克风无损采集 · AudioWorklet 渲染线程直录 PCM16 · 静音/停顿原样保留，不丢样、不截断</div>
+  </div>
+</div>
+
+<div class="card rec-card">
+  <div class="row between">
+    <div class="row rec-controls">
+      <button class="btn-green rec-btn" id="startBtn">
+        <span class="rec-dot"></span>开始录音
+      </button>
+      <button class="btn-danger rec-btn" id="stopBtn" disabled>■ 停止</button>
+      <label class="field inline">模式
+        <select id="modeSel">
+          <option value="voice" selected>语音（系统回声消除/降噪）</option>
+          <option value="music">原声（关闭所有处理，适合音乐）</option>
+        </select>
+      </label>
+      <span id="recState" class="badge neutral">待机</span>
+    </div>
+    <div id="recTime" class="rec-time mono">00:00.0</div>
+  </div>
+
+  <div class="mt">
+    <div class="small muted mb">实时电平（RMS 填充 · 峰值保持标记 · 刻度 dBFS）</div>
+    <div class="plot meter-wrap"><canvas id="meter" style="height:84px"></canvas></div>
+  </div>
+
+  <div class="mt">
+    <div class="small muted mb">实时波形（电平监听，不影响录音内容）</div>
+    <div class="plot"><canvas id="liveWave" style="height:110px"></canvas></div>
+  </div>
+
+  <div class="row mt small muted">
+    <span id="recInfo">点击「开始录音」并允许麦克风权限</span>
+    <span class="spacer"></span>
+    <span>支持短至几秒、长至十几分钟的连续录制</span>
+  </div>
+</div>
+
+<div class="card hidden" id="uploadCard">
+  <h2>保存录音到音频库</h2>
+  <div class="row between mb">
+    <label class="field inline">文件名
+      <input type="text" id="recName" style="width:280px" />
+    </label>
+    <span id="recMeta" class="small muted mono"></span>
+  </div>
+  <div class="progress hidden mt mb" id="upProgress"><span style="width:0"></span></div>
+  <div class="row">
+    <button class="btn-primary" id="saveBtn">💾 保存到音频库</button>
+    <button id="retrySave" class="hidden">重试保存</button>
+    <button id="discardBtn" class="btn-ghost">丢弃，重新录制</button>
+    <button id="previewBtn">▶ 试听</button>
+  </div>
+  <div class="mt small muted">录音停止后才会上传；保存成功后即可播放、编辑、分析与导出。</div>
+</div>
+
+<div class="card hidden" id="resultCard">
+  <h2>录音已入库</h2>
+  <div class="row">
+    <button class="btn-green" id="resPlay">▶ 播放</button>
+    <button class="btn-primary" id="resWave">〰 查看完整波形</button>
+    <button id="resSpec">📊 频谱分析</button>
+    <a class="btn" id="resDownload" href="#">下载</a>
+    <span class="spacer"></span>
+    <button class="btn-ghost" id="resAgain">再录一条</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/recorder.js"></script>
+<script>
+const $start = $("#startBtn"), $stop = $("#stopBtn"), $state = $("#recState");
+const $time = $("#recTime"), $info = $("#recInfo");
+const meterCv = $("#meter"), waveCv = $("#liveWave");
+const $upload = $("#uploadCard"), $save = $("#saveBtn"), $retry = $("#retrySave");
+const $discard = $("#discardBtn"), $preview = $("#previewBtn"), $name = $("#recName");
+const $meta = $("#recMeta"), $bar = $("#upProgress"), $barSpan = $bar.querySelector("span");
+const $result = $("#resultCard");
+
+let rec = null;
+let lastBlob = null, lastInfo = null, objectUrl = null, savedEntry = null;
+
+function setState(s) {
+  $state.className = "badge " + ({
+    idle: "neutral", recording: "red", stopping: "amber", done: "green",
+  }[s] || "neutral");
+  $state.textContent = { idle: "待机", recording: "● 录音中", stopping: "正在收尾…", done: "已停止" }[s] || s;
+}
+
+$start.addEventListener("click", async () => {
+  resetResult();
+  rec = new MicRecorder({
+    onTime: (t) => { $time.textContent = fmtClock(t); },
+    onLevels: drawMeter,
+    onData: (samples) => drawLiveWave(waveCv, samples, { color: "#3fb950" }),
+  });
+  try {
+    await rec.start($("#modeSel").value);
+  } catch (e) {
+    toast(e.message, "error", 6000);
+    setState("idle");
+    rec = null;
+    return;
+  }
+  $start.disabled = true;
+  $stop.disabled = false;
+  $("#modeSel").disabled = true;
+  setState("recording");
+  $info.textContent = `采样率 ${rec.sampleRate} Hz · 通道数识别中…`;
+});
+
+$stop.addEventListener("click", async () => {
+  if (!rec || !rec.recording) return;
+  $stop.disabled = true;
+  setState("stopping");
+  try {
+    const { blob, frames, sampleRate, channels } = await rec.stop();
+    lastBlob = blob;
+    lastInfo = { frames, sampleRate, channels };
+    onStopped(blob, frames, sampleRate, channels);
+  } catch (e) {
+    toast("收尾失败: " + e.message, "error");
+    $start.disabled = false; $stop.disabled = false;
+  } finally {
+    rec = null;
+  }
+});
+
+function onStopped(blob, frames, sampleRate, channels) {
+  if (frames <= 0) {
+    toast("没有采集到任何音频帧，请检查麦克风后重试", "warn", 5000);
+    $start.disabled = false;
+    $("#modeSel").disabled = false;
+    setState("idle");
+    return;
+  }
+  setState("done");
+  $start.disabled = false;
+  $("#modeSel").disabled = false;
+
+  const dur = frames / sampleRate;
+  const stamp = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const defaultName =
+    `录音-${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}` +
+    `-${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}.wav`;
+  $name.value = defaultName;
+  $meta.textContent =
+    `${fmtClock(dur)} · ${sampleRate} Hz · ${channels === 2 ? "立体声" : "单声道"} · ${frames} 帧 · ${fmtBytes(blob.size)}`;
+  $upload.classList.remove("hidden");
+  $save.disabled = false;
+  $retry.classList.add("hidden");
+  $bar.classList.add("hidden");
+  $barSpan.style.width = "0";
+  $result.classList.add("hidden");
+  $info.textContent = "录音已停止，确认文件名后保存到音频库";
+}
+
+$save.addEventListener("click", () => saveRecording());
+$retry.addEventListener("click", () => saveRecording());
+
+async function saveRecording() {
+  if (!lastBlob) return;
+  $save.disabled = true;
+  $bar.classList.remove("hidden");
+  try {
+    const entry = await API.uploadTo("/api/library/record", lastBlob, {
+      name: $name.value.trim() || "recording.wav",
+      sr: lastInfo.sampleRate,
+      channels: lastInfo.channels,
+      frames: lastInfo.frames,
+    }, (p) => { $barSpan.style.width = (p * 100).toFixed(1) + "%"; });
+    savedEntry = entry;
+    toast("录音已保存到音频库", "success");
+    $result.classList.remove("hidden");
+    $("#resDownload").href = API.downloadUrl(entry.id);
+    $retry.classList.add("hidden");
+  } catch (e) {
+    toast("保存失败: " + e.message, "error", 6000);
+    $save.disabled = false;
+    $retry.classList.remove("hidden");
+  }
+}
+
+$discard.addEventListener("click", () => {
+  if (!confirm("丢弃这条录音？未保存的音频将被清除。")) return;
+  resetResult();
+});
+
+$preview.addEventListener("click", () => {
+  if (!lastBlob) return;
+  if (!objectUrl) objectUrl = URL.createObjectURL(lastBlob);
+  const a = new Audio(objectUrl);
+  a.play().catch(() => toast("无法试听", "error"));
+});
+
+$("#resPlay").addEventListener("click", () => savedEntry && playFile(savedEntry.id, savedEntry.name));
+$("#resWave").addEventListener("click", () => savedEntry && (location.href = "/waveform?file=" + savedEntry.id));
+$("#resSpec").addEventListener("click", () => savedEntry && (location.href = "/spectrogram?file=" + savedEntry.id));
+$("#resAgain").addEventListener("click", resetResult);
+
+function resetResult() {
+  lastBlob = null; lastInfo = null; savedEntry = null;
+  if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+  $upload.classList.add("hidden");
+  $result.classList.add("hidden");
+  $bar.classList.add("hidden");
+  $time.textContent = "00:00.0";
+  $info.textContent = "点击「开始录音」并允许麦克风权限";
+  setState("idle");
+  drawMeter([{ rms: 0, peak: 0, peakDb: -60, holdDb: -60 }], 1);
+  const { ctx, w, h } = setupCanvas(waveCv);
+  ctx.clearRect(0, 0, w, h);
+}
+
+function fmtClock(s) {
+  if (!isFinite(s)) s = 0;
+  const m = Math.floor(s / 60);
+  const sec = (s % 60);
+  return `${String(m).padStart(2, "0")}:${sec.toFixed(1).padStart(4, "0")}`;
+}
+
+/* -------------------------------------------------------------- level meter */
+
+const DB_MIN = -60;
+
+function drawMeter(levels, chCount) {
+  const { ctx, w, h } = setupCanvas(meterCv);
+  ctx.clearRect(0, 0, w, h);
+  const rows = Math.max(1, levels.length);
+  const rowH = h / rows;
+  const padL = 46, padR = 8, gap = 6;
+  const bw = w - padL - padR;
+
+  // dB ticks
+  ctx.font = "10px sans-serif";
+  ctx.fillStyle = "rgba(139,148,158,0.7)";
+  ctx.strokeStyle = "rgba(139,148,158,0.18)";
+  [-60, -48, -36, -24, -12, 0].forEach((db) => {
+    const x = padL + ((db - DB_MIN) / (0 - DB_MIN)) * bw;
+    ctx.beginPath(); ctx.moveTo(x, 4); ctx.lineTo(x, h - 4); ctx.stroke();
+    ctx.fillText(db + "", x - 8, h - 6);
+  });
+
+  levels.forEach((lv, i) => {
+    const y0 = i * rowH + gap / 2;
+    const bh = rowH - gap;
+    const rmsDb = lv.rms > 1e-7 ? 20 * Math.log10(lv.rms) : DB_MIN;
+    const xEnd = (db) => padL + (Math.max(DB_MIN, db) - DB_MIN) / (0 - DB_MIN) * bw;
+
+    // background
+    ctx.fillStyle = "rgba(139,148,158,0.12)";
+    ctx.fillRect(padL, y0, bw, bh);
+
+    // RMS fill, colour graded green -> amber -> red
+    const xr = xEnd(rmsDb);
+    const grad = ctx.createLinearGradient(padL, 0, padL + bw, 0);
+    grad.addColorStop(0, "#3fb950");
+    grad.addColorStop(0.66, "#3fb950");
+    grad.addColorStop(0.82, "#d29922");
+    grad.addColorStop(1, "#f85149");
+    ctx.fillStyle = grad;
+    ctx.fillRect(padL, y0, xr - padL, bh);
+
+    // peak-hold marker
+    ctx.fillStyle = lv.holdDb > -3 ? "#f85149" : "#e6edf3";
+    ctx.fillRect(xEnd(lv.holdDb) - 1.5, y0, 3, bh);
+
+    // channel label
+    ctx.fillStyle = "rgba(139,148,158,0.9)";
+    ctx.fillText(chCount > 1 ? (i === 0 ? "L" : "R") : "MIC", 8, y0 + bh / 2 + 3.5);
+  });
+}
+
+setState("idle");
+drawMeter([{ rms: 0, peak: 0, peakDb: -60, holdDb: -60 }], 1);
+</script>
+{% endblock %}

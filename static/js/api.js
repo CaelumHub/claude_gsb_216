@@ -24,17 +24,32 @@ const API = {
   del(url) { return this.request("DELETE", url); },
 
   async upload(file, onProgress) {
+    return this.uploadTo("/api/library/upload", file, {}, onProgress);
+  },
+
+  /**
+   * Multipart upload of a Blob/File with extra text fields and progress.
+   * Used by file uploads and by the in-browser recorder (PCM16 WAV Blob).
+   */
+  async uploadTo(url, file, fields, onProgress) {
     const fd = new FormData();
-    fd.append("file", file);
+    fd.append("file", file, (fields && fields.name) || file.name || "audio.wav");
+    if (fields) {
+      for (const [k, v] of Object.entries(fields)) {
+        if (v !== undefined && v !== null) fd.append(k, v);
+      }
+    }
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/library/upload");
+      xhr.open("POST", url);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
       };
       xhr.onload = () => {
-        try { resolve(JSON.parse(xhr.responseText)); }
-        catch (_) { reject(new Error(xhr.responseText || "upload failed")); }
+        let data = null;
+        try { data = JSON.parse(xhr.responseText); } catch (_) { /* non-JSON */ }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+        else reject(new Error((data && data.error) || `HTTP ${xhr.status}`));
       };
       xhr.onerror = () => reject(new Error("upload failed"));
       xhr.send(fd);
