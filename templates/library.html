@@ -97,6 +97,7 @@ const SRC_LABEL = {
 };
 function srcBadge(f) {
   if (f.exported) return `<span class="badge amber">导出</span>`;
+  if (f.recorded || f.original_format === "recording") return `<span class="badge green">录音</span>`;
   if (f.separation) return `<span class="badge purple">分离</span>`;
   if (f.project_id) return `<span class="badge green">混音</span>`;
   if (f.effects) return `<span class="badge purple">效果</span>`;

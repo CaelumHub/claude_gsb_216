@@ -24,17 +24,24 @@ const API = {
   del(url) { return this.request("DELETE", url); },
 
   async upload(file, onProgress) {
+    return this.uploadTo("/api/library/upload", file, onProgress);
+  },
+
+  async uploadTo(url, file, onProgress) {
     const fd = new FormData();
-    fd.append("file", file);
+    fd.append("file", file, file.name);
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/library/upload");
+      xhr.open("POST", url);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
       };
       xhr.onload = () => {
-        try { resolve(JSON.parse(xhr.responseText)); }
-        catch (_) { reject(new Error(xhr.responseText || "upload failed")); }
+        try {
+          const data = JSON.parse(xhr.responseText);
+          if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+          else reject(new Error(data.error || ("HTTP " + xhr.status)));
+        } catch (_) { reject(new Error(xhr.responseText || "upload failed")); }
       };
       xhr.onerror = () => reject(new Error("upload failed"));
       xhr.send(fd);

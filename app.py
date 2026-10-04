@@ -18,6 +18,7 @@ import math
 import os
 import shutil
 import tempfile
+import time
 from typing import Dict, Optional
 
 from flask import Flask, jsonify, render_template, request, send_file
@@ -85,6 +86,7 @@ def _register_derived(source_id: str, name: str, wav_path: str,
 
 PAGES = {
     "library": "音频库",
+    "record": "录音",
     "waveform": "波形编辑",
     "spectrogram": "频谱分析",
     "pitch_beat": "音高与节拍",
@@ -183,6 +185,77 @@ def api_upload():
         })
     return jsonify(entry)
 
+
+@app.post("/api/library/record")
+def api_record():
+    """Save a microphone recording (browser-encoded PCM WAV) into the library.
+
+    The browser captures sample-accurate PCM and wraps it in a WAV container;
+    here we verify the file and register *exactly* the duration / sample rate /
+    channel count read back from disk, so the recording is indistinguishable
+    from any other library file (play, waveform, edit, analyse, export …).
+    Silences and pauses are ordinary zero-amplitude frames and need no special
+    handling — streaming through the file preserves every frame.
+    """
+    f = request.files.get("file")
+    if f is None or not f.filename:
+        return jsonify(error="no recording provided"), 400
+
+    fd, tmp = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    f.save(tmp)
+
+    file_id = storage.new_id()
+    dst = os.path.join(store.audio_dir, file_id + ".wav")
+    try:
+        # Verify the upload is a readable WAV and normalise it to canonical
+        # PCM16 (the browser already sends PCM16, so this is usually a no-op
+        # move of the header check).
+        try:
+            with audio_io.WavReader(tmp) as probe:
+                if probe.nframes <= 0 or probe.sr <= 0 or probe.channels <= 0:
+                    raise ValueError("recording contains no audio frames")
+                canonical = (probe.sample_width == 2 and probe.comptype == "NONE")
+        except Exception as e:
+            return jsonify(error=f"invalid recording: {e}"), 400
+
+        if canonical:
+            shutil.move(tmp, dst)
+        else:
+            audio_io._convert_wav(tmp, dst, None, "pcm16", None)
+
+        with audio_io.WavReader(dst) as r:
+            sr, ch, frames = r.sr, r.channels, r.nframes
+            duration = r.duration
+
+        name = (request.args.get("name") or request.form.get("name") or "").strip()
+        if not name:
+            name = "录音-" + time.strftime("%Y%m%d-%H%M%S") + ".wav"
+        elif not name.lower().endswith(".wav"):
+            name += ".wav"
+
+        entry = store.add_file({
+            "id": file_id,
+            "name": name,
+            "original_format": "recording",
+            "path": f"audio/{file_id}.wav",
+            "sr": sr,
+            "channels": ch,
+            "frames": frames,
+            "duration": duration,
+            "size_bytes": os.path.getsize(dst),
+            "recorded": True,
+            "bit_depth": 16,
+        })
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return jsonify(entry)
+
+
+# --------------------------------------------------------------------------- #
+# Test-signal synthesis
+# --------------------------------------------------------------------------- #
 
 def _synth(kind: str, sr: int, duration: float, freq: float) -> list:
     """Generate a simple test signal (used by the 'generate' endpoint)."""

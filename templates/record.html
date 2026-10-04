@@ -1,0 +1,390 @@
+{% extends "base.html" %}
+{% block title %}录音{% endblock %}
+{% block content %}
+<div class="main-head">
+  <div>
+    <h1>录音</h1>
+    <div class="sub">麦克风采样级录制 · 实时电平 · 静音与停顿原样保留 · 停止后自动入库（PCM 16-bit WAV）</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>录音设置</h2>
+  <div class="row">
+    <label class="field inline">输入设备
+      <select id="micSel" style="min-width:260px"></select>
+    </label>
+    <label class="field inline">
+      <input type="checkbox" id="voiceMode" /> 人声优化（回声消除 / 降噪 / 自动增益）
+    </label>
+    <button class="btn-ghost btn-sm" id="refreshDev" title="重新检测设备">↻</button>
+    <span class="faint small">默认关闭所有处理，保证长时间静音、停顿如实保留；使用设备原始采样率，不重采样。</span>
+  </div>
+</div>
+
+<div class="card rec-card">
+  <div class="row between">
+    <div class="row">
+      <button id="recBtn" class="rec-btn" title="开始录音">
+        <span class="rec-dot"></span>
+      </button>
+      <div>
+        <div id="recTimer" class="rec-timer mono">00:00.0</div>
+        <div id="recState" class="small muted">点击按钮开始录音</div>
+      </div>
+    </div>
+    <div id="recFmt" class="small muted mono"></div>
+  </div>
+
+  <div class="mt">
+    <div class="plot"><canvas id="liveWave" style="height:170px"></canvas></div>
+  </div>
+
+  <div class="mt meters" id="meters">
+    <div class="meter-row">
+      <span class="meter-tag mono" id="tag0">L</span>
+      <canvas id="meter0" class="meter-canvas"></canvas>
+      <span class="clip-tag" id="clip0"></span>
+    </div>
+    <div class="meter-row" id="meterRow1">
+      <span class="meter-tag mono" id="tag1">R</span>
+      <canvas id="meter1" class="meter-canvas"></canvas>
+      <span class="clip-tag" id="clip1"></span>
+    </div>
+  </div>
+  <div class="row small faint mt" style="justify-content:space-between">
+    <span>-60 dB</span><span>-48</span><span>-36</span><span>-24</span><span>-12</span><span>-6</span><span>0 dB</span>
+  </div>
+</div>
+
+<div class="card hidden" id="resultCard">
+  <h2>录音完成</h2>
+  <div class="row between">
+    <div>
+      <div id="resultMeta" class="mono small muted"></div>
+      <audio id="preview" controls class="mt" style="width:380px;max-width:100%"></audio>
+    </div>
+  </div>
+  <div class="row mt">
+    <label class="field inline">名称
+      <input type="text" id="recName" style="width:280px" />
+    </label>
+    <button class="btn-primary" id="saveBtn">保存到音频库</button>
+    <button id="discardBtn">放弃，重新录制</button>
+    <div class="progress hidden" id="saveProgress" style="flex:1;min-width:140px"><span style="width:0"></span></div>
+  </div>
+  <div class="row mt hidden" id="savedRow">
+    <span class="badge green">已入库</span>
+    <button class="btn-sm btn-green" id="savedWaveBtn">▶ 在波形页查看完整波形</button>
+    <button class="btn-sm" id="savedPlay">播放</button>
+    <button class="btn-sm" id="savedAgain">继续录新一段</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>最近的录音 <span id="recCount" class="badge neutral"></span></h2>
+  <table>
+    <thead>
+      <tr><th>名称</th><th>时长</th><th>采样率</th><th>声道</th><th>大小</th><th>录制时间</th><th style="width:200px">操作</th></tr>
+    </thead>
+    <tbody id="recList"></tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/recorder.js"></script>
+<script>
+const recBtn = $("#recBtn"), timerEl = $("#recTimer"), stateEl = $("#recState"),
+      fmtEl = $("#recFmt"), waveCv = $("#liveWave");
+
+let recorder = null, rafId = 0, startedAt = 0;
+const meterState = [
+  { level: -60, peak: -60, peakHold: -60, peakTimer: 0 },
+  { level: -60, peak: -60, peakHold: -60, peakTimer: 0 },
+];
+const TRACE = new Float32Array(4096);
+
+/* ------------------------------------------------------------- devices */
+
+async function loadDevices() {
+  const sel = $("#micSel");
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const mics = devices.filter(d => d.kind === "audioinput");
+    sel.innerHTML = mics.map((d, i) =>
+      `<option value="${esc(d.deviceId)}">${esc(d.label || ("麦克风 " + (i + 1)))}</option>`).join("")
+      || `<option value="">默认设备</option>`;
+  } catch (_) {
+    sel.innerHTML = `<option value="">默认设备</option>`;
+  }
+}
+$("#refreshDev").onclick = loadDevices;
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+  navigator.mediaDevices.addEventListener("devicechange", loadDevices);
+}
+
+/* ----------------------------------------------------------- recording */
+
+recBtn.onclick = async () => {
+  if (recorder && recorder.state === "recording") { stopRecording(); return; }
+  if (!MicRecorder.supported()) {
+    toast("当前浏览器不支持麦克风采集（需要 getUserMedia）", "error");
+    return;
+  }
+  const rec = new MicRecorder();
+  try {
+    stateEl.textContent = "正在请求麦克风权限…";
+    await rec.start({
+      deviceId: $("#micSel").value || null,
+      voiceMode: $("#voiceMode").checked,
+    });
+  } catch (e) {
+    stateEl.textContent = "无法开始录音";
+    toast(e.message, "error", 5000);
+    return;
+  }
+  recorder = rec;
+  await loadDevices(); // pick up labels once permission is granted
+  startedAt = performance.now();
+  setUiRecording(true);
+  stateEl.textContent = "录音中 — 静音与停顿会被完整保留";
+  requestTick();
+  window.addEventListener("beforeunload", onBeforeUnload);
+};
+
+async function stopRecording() {
+  if (!recorder) return;
+  setUiRecording(false);
+  cancelAnimationFrame(rafId);
+  stateEl.textContent = "正在生成 WAV…";
+  let blob;
+  try {
+    blob = await recorder.stop();
+  } catch (e) {
+    toast("停止录音失败: " + e.message, "error");
+    stateEl.textContent = "录音失败";
+    return;
+  }
+  window.removeEventListener("beforeunload", onBeforeUnload);
+  if (!blob) {
+    stateEl.textContent = "未采集到任何音频，请检查麦克风";
+    toast("录音为空（没有采集到音频帧）", "warn");
+    recorder = null;
+    return;
+  }
+  presentResult(blob);
+}
+
+function setUiRecording(on) {
+  recBtn.classList.toggle("recording", on);
+  recBtn.title = on ? "停止并保存" : "开始录音";
+  $("#saveBtn").disabled = false;
+  if (on) {
+    $("#resultCard").classList.add("hidden");
+    $("#savedRow").classList.add("hidden");
+    $("#saveProgress").classList.add("hidden");
+  }
+}
+
+function onBeforeUnload(e) {
+  if (recorder && recorder.state === "recording") {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+}
+
+/* -------------------------------------------------------------- meters */
+
+function toDb(x) { return x > 1e-6 ? 20 * Math.log10(x) : -60; }
+
+function requestTick() {
+  rafId = requestAnimationFrame(loop);
+}
+
+function loop() {
+  const rec = recorder;
+  if (!rec || rec.state !== "recording") return;
+
+  // Sample-accurate elapsed time (frames counted from the audio thread).
+  timerEl.textContent = fmtClock(rec.elapsed);
+  if (rec.channels > 0 && !fmtEl.dataset.ok) {
+    fmtEl.dataset.ok = "1";
+    fmtEl.textContent = `${rec.sampleRate} Hz · ${rec.channels === 2 ? "立体声" : "单声道"} · PCM 16-bit`;
+    $("#meterRow1").style.display = rec.channels === 2 ? "flex" : "none";
+    if (rec.channels === 2) { $("#tag0").textContent = "L"; $("#tag1").textContent = "R"; }
+    else { $("#tag0").textContent = "MIC"; }
+  }
+
+  const chShow = Math.max(1, rec.channels);
+  for (let c = 0; c < 2; c++) {
+    const m = meterState[c];
+    if (c < chShow) {
+      const db = toDb(rec.rms(c));
+      const pk = toDb(rec.peak(c));
+      // Fast attack, slow release for a readable RMS needle.
+      m.level = db > m.level ? db : m.level * 0.82 + db * 0.18;
+      m.peak = pk;
+      if (pk >= m.peakHold) { m.peakHold = pk; m.peakTimer = performance.now(); }
+      else if (performance.now() - m.peakTimer > 900) m.peakHold = Math.max(-60, m.peakHold - 14 / 60);
+      drawMeter($("#meter" + c), m, rec.clip[c]);
+    }
+  }
+
+  rec.readTrace(TRACE, 0);
+  drawLiveWave(waveCv, TRACE, { color: "#3fb950" });
+  rafId = requestAnimationFrame(loop);
+}
+
+const METER_GRADIENT_STOPS = [[-60, "#1f6feb"], [-24, "#3fb950"], [-12, "#d29922"], [-3, "#f85149"]];
+function meterColor(db) {
+  for (let i = METER_GRADIENT_STOPS.length - 1; i >= 0; i--) {
+    if (db >= METER_GRADIENT_STOPS[i][0]) return METER_GRADIENT_STOPS[i][1];
+  }
+  return METER_GRADIENT_STOPS[0][1];
+}
+
+function drawMeter(canvas, m, clip) {
+  const { ctx, w, h } = setupCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "rgba(139,148,158,0.14)";
+  ctx.fillRect(0, 0, w, h);
+  const xAt = (db) => Math.max(0, Math.min(1, (db + 60) / 60)) * w;
+  // Segmented gradient bar.
+  const seg = 3;
+  for (let x = 0; x < xAt(m.level); x += seg) {
+    const db = (x / w) * 60 - 60;
+    ctx.fillStyle = meterColor(db);
+    ctx.fillRect(x, 0, seg - 1, h);
+  }
+  // Peak-hold marker.
+  ctx.fillStyle = "#e6edf3";
+  ctx.fillRect(xAt(m.peakHold) - 1, 0, 2, h);
+  // 0 dBFS line.
+  ctx.fillStyle = "rgba(139,148,158,0.5)";
+  ctx.fillRect(w - 1, 0, 1, h);
+  const clipEl = canvas.parentElement.querySelector(".clip-tag");
+  if (clip) { clipEl.textContent = "削波 CLIP"; clipEl.style.color = "var(--red)"; }
+}
+
+function fmtClock(s) {
+  const m = Math.floor(s / 60);
+  const sec = (s % 60).toFixed(1).padStart(4, "0");
+  return `${String(m).padStart(2, "0")}:${sec}`;
+}
+
+/* ------------------------------------------------------------- result */
+
+let lastBlob = null, lastUrl = null, lastMeta = null;
+
+function presentResult(blob) {
+  lastBlob = blob;
+  if (lastUrl) URL.revokeObjectURL(lastUrl);
+  lastUrl = URL.createObjectURL(blob);
+  const rec = recorder;
+  lastMeta = {
+    duration: rec.elapsed,
+    sr: rec.sampleRate,
+    channels: rec.channels,
+    frames: rec.frames,
+    size: blob.size,
+  };
+  recorder = null;
+  stateEl.textContent = "已停止";
+  timerEl.textContent = fmtClock(lastMeta.duration);
+
+  const card = $("#resultCard");
+  card.classList.remove("hidden");
+  $("#resultMeta").textContent =
+    `${lastMeta.duration.toFixed(3)} s · ${lastMeta.frames} 帧 · ${lastMeta.sr} Hz · ` +
+    `${lastMeta.channels === 2 ? "立体声" : "单声道"} · ${fmtBytes(lastMeta.size)}`;
+  const pv = $("#preview");
+  pv.src = lastUrl;
+  $("#recName").value = "录音-" + timeStampNow() + ".wav";
+  $("#saveProgress").classList.add("hidden");
+  $("#saveProgress").querySelector("span").style.width = "0";
+  $("#savedRow").classList.add("hidden");
+  card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function timeStampNow() {
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+$("#discardBtn").onclick = () => {
+  if (lastUrl) { URL.revokeObjectURL(lastUrl); lastUrl = null; }
+  lastBlob = null;
+  $("#resultCard").classList.add("hidden");
+  stateEl.textContent = "已放弃，点击按钮重新录音";
+};
+
+$("#saveBtn").onclick = async () => {
+  if (!lastBlob) return;
+  const btn = $("#saveBtn");
+  btn.disabled = true;
+  const bar = $("#saveProgress");
+  bar.classList.remove("hidden");
+  const file = new File([lastBlob], $("#recName").value.trim() || "recording.wav",
+                        { type: "audio/wav" });
+  try {
+    const entry = await API.uploadTo(
+      "/api/library/record?name=" + encodeURIComponent($("#recName").value.trim()),
+      file, p => bar.querySelector("span").style.width = (p * 100).toFixed(0) + "%");
+    toast("录音已保存到音频库", "success");
+    const row = $("#savedRow");
+    row.classList.remove("hidden");
+    $("#savedWaveBtn").onclick = () => location.href = "/waveform?file=" + entry.id;
+    $("#savedPlay").onclick = () => playFile(entry.id, entry.name);
+    loadRecent();
+  } catch (e) {
+    toast("保存失败: " + e.message, "error", 5000);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+$("#savedAgain").onclick = () => {
+  $("#resultCard").classList.add("hidden");
+  stateEl.textContent = "点击按钮开始录音";
+  window.scrollTo({ top: 0, behavior: "smooth" });
+};
+
+/* -------------------------------------------------------- recent list */
+
+async function loadRecent() {
+  const files = await API.get("/api/library");
+  const recs = files.filter(f => f.recorded || f.original_format === "recording").slice(0, 8);
+  $("#recCount").textContent = recs.length + " 条";
+  $("#recList").innerHTML = recs.length ? recs.map(f => `
+    <tr>
+      <td class="name">${esc(f.name)}</td>
+      <td class="mono">${fmtTime(f.duration)}</td>
+      <td class="mono">${f.sr} Hz</td>
+      <td>${f.channels === 2 ? "立体声" : f.channels === 1 ? "单声道" : f.channels}</td>
+      <td>${fmtBytes(f.size_bytes)}</td>
+      <td class="muted small">${esc(f.uploaded_at || "")}</td>
+      <td class="row">
+        <button class="btn-sm" onclick="playFile('${f.id}','${esc(f.name)}')">▶ 播放</button>
+        <button class="btn-sm" onclick="location.href='/waveform?file=${f.id}'">波形</button>
+        <a class="btn btn-sm" href="${API.downloadUrl(f.id)}">下载</a>
+      </td>
+    </tr>`).join("")
+    : `<tr><td colspan="7" class="muted" style="text-align:center;padding:18px">还没有录音</td></tr>`;
+}
+
+/* Initial clear of the canvases + meter layout. */
+function paintIdle() {
+  const { ctx, w, h } = setupCanvas(waveCv);
+  ctx.clearRect(0, 0, w, h);
+  ctx.strokeStyle = "rgba(139,148,158,0.3)";
+  ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+  [0, 1].forEach(i => drawMeter($("#meter" + i), meterState[i], false));
+}
+window.addEventListener("resize", paintIdle);
+
+loadDevices();
+loadRecent();
+paintIdle();
+</script>
+{% endblock %}

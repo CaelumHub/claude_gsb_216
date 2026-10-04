@@ -390,3 +390,54 @@ tr:hover td { background: var(--bg-raised); }
 
 details.help { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
 details.help summary { cursor: pointer; color: var(--accent); }
+
+/* Recording page ----------------------------------------------------------- */
+
+.rec-btn {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: var(--red-soft);
+  border: 2px solid var(--red);
+  transition: background 0.15s, border-radius 0.2s, transform 0.1s;
+  flex-shrink: 0;
+}
+.rec-btn:hover { background: rgba(248, 81, 73, 0.28); }
+.rec-btn:active { transform: scale(0.95); }
+
+.rec-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--red);
+  transition: border-radius 0.2s, width 0.2s, height 0.2s;
+}
+.rec-btn.recording {
+  background: var(--red);
+  border-color: var(--red);
+}
+.rec-btn.recording .rec-dot {
+  border-radius: 4px;
+  width: 18px;
+  height: 18px;
+  background: #fff;
+}
+.rec-btn.recording:hover { background: #e8453d; }
+
+.rec-timer { font-size: 26px; font-weight: 700; letter-spacing: 1px; line-height: 1.15; }
+.rec-card { border-color: var(--border-strong); }
+
+.meters { display: flex; flex-direction: column; gap: 6px; }
+.meter-row { display: flex; align-items: center; gap: 8px; }
+.meter-tag {
+  width: 34px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-align: center;
+}
+.meter-canvas { flex: 1; height: 14px; display: block; border-radius: 3px; }
+.clip-tag { font-size: 11px; font-weight: 700; width: 78px; text-align: right; }
